@@ -66,13 +66,12 @@ pip install -r requirements.txt
 Ou instale individualmente:
 
 ```bash
-pip install sf2utils==1.3.0
-pip install pretty_midi==0.2.10
-pip install librosa==0.10.1
-pip install colorama==0.4.6
-pip install numpy==1.24.0
-pip install dataclasses==0.8     # Somente para Python 3.6
-pip install typing_extensions==4.7.1
+pip install sf2utils>=1.0.0
+pip install pretty_midi>=0.2.9
+pip install librosa>=0.9.2
+pip install colorama>=0.4.4
+pip install numpy>=1.20.0
+pip install typing_extensions>=4.0.0
 ```
 
 ### Instalação do FluidSynth
