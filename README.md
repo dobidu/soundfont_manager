@@ -1,4 +1,4 @@
-# Sistema Avançado de Gerenciamento de Soundfonts
+# Sistema de Gerenciamento de Soundfonts
 
 Um sistema completo para gerenciamento, anotação e utilização de soundfonts em projetos MIDI desenvolvido em Python.
 
