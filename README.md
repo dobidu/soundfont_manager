@@ -1,4 +1,4 @@
-# Soundfont Management System
+# Python Soundfont Management System
 
 A comprehensive Python system for managing, analyzing, and utilizing soundfonts in MIDI projects.
 
