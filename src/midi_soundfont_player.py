@@ -49,6 +49,7 @@ class Chord(Enum):
     MINOR_6TH = "minor_6th"
     NINTH = "ninth"
     MINOR_9TH = "minor_9th"
+    POWER = "power" 
 
 class MusicGenerator:
     """
@@ -86,7 +87,8 @@ class MusicGenerator:
         Chord.SIXTH: [0, 4, 7, 9],
         Chord.MINOR_6TH: [0, 3, 7, 9],
         Chord.NINTH: [0, 4, 7, 10, 14],
-        Chord.MINOR_9TH: [0, 3, 7, 10, 14]
+        Chord.MINOR_9TH: [0, 3, 7, 10, 14],
+        Chord.POWER: [0, 7]
     }
     
     # Mapping of note names to MIDI numbers (C4 = 60)
