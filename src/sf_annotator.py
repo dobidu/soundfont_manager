@@ -3,7 +3,6 @@ import os
 import json
 import argparse
 import pretty_midi
-import shlex
 import logging
 import subprocess
 import tempfile
@@ -26,12 +25,91 @@ from soundfont_utils import (
     generate_tag_suggestions,
     suggest_genres,
     suggest_quality,
-    create_test_midi
+    create_test_midi,
 )
+
+from fluidsynth_helper import (
+    run_fluidsynth,
+    detect_audio_driver
+)
+
 from soundfont_manager import SoundfontManager
+
+from sound_test import play_wav_simple
+
 
 # Initialize Colorama
 init(autoreset=True)
+
+def check_audio_dependencies(debug=False):
+    """
+    Check which audio playback modules are available and try to 
+    install one if necessary.
+    
+    Args:
+        debug: If True, shows debug info
+        
+    Returns:
+        True if at least one dependency is available
+    """
+    available_packages = []
+    
+    try:
+        import pygame
+        available_packages.append("pygame")
+    except ImportError:
+        if debug:
+            print("pygame not available")
+    
+    try:
+        import playsound
+        available_packages.append("playsound")
+    except ImportError:
+        if debug:
+            print("playsound not available")
+    
+    try:
+        import simpleaudio
+        available_packages.append("simpleaudio")
+    except ImportError:
+        if debug:
+            print("simpleaudio not available")
+    
+    try:
+        import sounddevice
+        import soundfile
+        available_packages.append("sounddevice+soundfile")
+    except ImportError:
+        if debug:
+            print("sounddevice and/or soundfile not available")
+    
+    # Se nenhum pacote estiver disponível, tente instalar um
+    if not available_packages:
+        try:
+            print("No audio library found. Trying to install pygame...")
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "pygame"], 
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE)
+            
+            # Verificar se conseguimos instalar
+            try:
+                import pygame
+                available_packages.append("pygame")
+                print("pygame installed!")
+            except ImportError:
+                pass
+        except Exception as e:
+            if debug:
+                print(f"pygame was not installed: {e}")
+    
+    if debug:
+        if available_packages:
+            print(f"Available audio libraries: {', '.join(available_packages)}")
+        else:
+            print("No audio library available.")
+    
+    return len(available_packages) > 0
 
 class AnalysisMode(Enum):
     """Available analysis modes."""
@@ -134,50 +212,6 @@ def setup_argparse() -> argparse.ArgumentParser:
     
     return parser
 
-def escape_path(path: str) -> str:
-    """
-    Escape a file path for safe use in shell commands.
-    
-    Args:
-        path: File path
-        
-    Returns:
-        Escaped path
-    """
-    return shlex.quote(path)
-
-def detect_audio_driver():
-    """
-    Detect the appropriate audio driver for FluidSynth based on the operating system.
-    
-    Returns:
-        Name of the audio driver to use
-    """
-    system = platform.system().lower()
-    
-    if system == 'linux':
-        # Check if pulseaudio is running
-        try:
-            result = subprocess.run(
-                ['pulseaudio', '--check'], 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL
-            )
-            if result.returncode == 0:
-                return 'pulseaudio'
-        except:
-            pass
-        
-        # Default to alsa on Linux
-        return 'alsa'
-    elif system == 'darwin':
-        return 'coreaudio'
-    elif system == 'windows':
-        return 'dsound'
-    else:
-        # Safe default
-        return 'alsa'
-
 def check_fluidsynth_available():
     """
     Check if FluidSynth is available in the system path.
@@ -208,77 +242,55 @@ def play_soundfont_test(soundfont_path: str, audio_driver: Optional[str] = None,
     Returns:
         True if playback was successful, False otherwise
     """
-    # Check if FluidSynth is available
-    if not check_fluidsynth_available():
-        print(Fore.RED + "Error: FluidSynth is not available in your system path." + Style.RESET_ALL)
-        print(Fore.YELLOW + "Please install FluidSynth and make sure it's in your PATH." + Style.RESET_ALL)
-        return False
+    # Check audio dependencies first
+    audio_available = check_audio_dependencies(debug)
+    if not audio_available and debug:
+        print(Fore.YELLOW + "No audio library found. Playback may be limited." + Style.RESET_ALL)
     
-    # Create a temporary MIDI file
-    try:
-        midi_file = create_test_midi()
-        if not midi_file or not os.path.exists(midi_file):
-            print(Fore.RED + "Error: Failed to create test MIDI file." + Style.RESET_ALL)
-            return False
-    except Exception as e:
-        print(Fore.RED + f"Error creating test MIDI: {e}" + Style.RESET_ALL)
-        return False
+    print(Fore.YELLOW + "\nGenerating soundfont test..." + Style.RESET_ALL)
+    print(Fore.YELLOW + "Please wait, this may take a few seconds." + Style.RESET_ALL)
     
-    # Detect the appropriate audio driver if not specified
-    if audio_driver is None:
-        audio_driver = detect_audio_driver()
+    # Create a temporary directory
+    temp_dir = tempfile.mkdtemp()
+    wav_path = os.path.join(temp_dir, "soundfont_test.wav")
     
-    try:
-        # Escape paths for shell
-        escaped_sf2_path = escape_path(soundfont_path)
-        escaped_midi_file = escape_path(midi_file)
+    # Generate the WAV file
+    success = test_soundfont_simple(soundfont_path, wav_path, debug)
+    
+    if success:
+        print(Fore.GREEN + "Soundfont test completed successfully!" + Style.RESET_ALL)
         
-        # Build the FluidSynth command
-        cmd = [
-            'fluidsynth',
-            '-a', audio_driver,  # Audio driver
-            '-g', '1.0',         # Gain
-            '-r', '44100',       # Sample rate
-            '-l',                # Don't print banner
-            escaped_sf2_path,    # Soundfont file
-            escaped_midi_file    # MIDI file
-        ]
-        
-        # Print the command if in debug mode
         if debug:
-            print(Fore.CYAN + f"Running: {' '.join(cmd)}" + Style.RESET_ALL)
+            print(Fore.CYAN + f"Generated WAV file: {wav_path}" + Style.RESET_ALL)
         
-        # Play the MIDI file using FluidSynth
-        print(Fore.YELLOW + "\nPlaying test arpeggio..." + Style.RESET_ALL)
-        print(Fore.YELLOW + "Press Ctrl+C to stop playback." + Style.RESET_ALL)
-        
-        # Run FluidSynth as a subprocess
-        result = subprocess.run(
-            ' '.join(cmd), 
-            shell=True, 
-            stderr=subprocess.PIPE if not debug else None,
-            stdout=subprocess.PIPE if not debug else None
+        # Ask if the user wants to hear the sound
+        play_sound = validate_and_get_input(
+            "Do you want to hear the generated sound?",
+            options=["y", "n"],
+            default="y"
         )
         
-        if result.returncode != 0 and debug:
-            print(Fore.RED + "FluidSynth returned an error:" + Style.RESET_ALL)
-            if result.stderr:
-                print(result.stderr.decode('utf-8', errors='replace'))
-            return False
+        if play_sound.lower() == "y":
+            played = play_wav_simple(wav_path, debug)
             
-        return result.returncode == 0
+            if not played:
+                print(Fore.YELLOW + "Unable to play the sound automatically." + Style.RESET_ALL)
+                print(Fore.YELLOW + f"You can find the test file at: {wav_path}" + Style.RESET_ALL)
+                
+                # Suggest alternative options
+                system = platform.system().lower()
+                if system == 'linux':
+                    print(Fore.YELLOW + "Try playing manually with: aplay " + wav_path + Style.RESET_ALL)
+                elif system == 'darwin':
+                    print(Fore.YELLOW + "Try playing manually with: afplay " + wav_path + Style.RESET_ALL)
+                elif system == 'windows':
+                    print(Fore.YELLOW + "Try opening the file with the default Windows audio player." + Style.RESET_ALL)
+    else:
+        print(Fore.RED + "Failed to generate the sound test for this soundfont." + Style.RESET_ALL)
+        if debug:
+            print(Fore.RED + "Make sure FluidSynth is installed correctly and the soundfont is valid." + Style.RESET_ALL)
     
-    except Exception as e:
-        print(Fore.RED + f"Error playing test: {e}" + Style.RESET_ALL)
-        return False
-    
-    finally:
-        # Remove the temporary MIDI file
-        if midi_file and os.path.exists(midi_file):
-            try:
-                os.remove(midi_file)
-            except:
-                pass
+    return success
 
 def list_soundfonts(directory: str, recursive: bool = False) -> List[str]:
     """
@@ -539,63 +551,128 @@ def annotate_soundfont(soundfont_path: str, manager: SoundfontManager, mode: Ana
             if edit.lower() == "y":
                 manual_metadata = get_manual_metadata(auto_metadata)
                 
-                # Merge automatic metadata with manual metadata
+                # Merge automatic metadata with manual metadata 
                 # (manual metadata takes precedence)
                 merged_metadata = {**auto_metadata, **manual_metadata}
                 
-                # Add the soundfont to the manager
-                sf = None
-                try:
-                    sf = manager.add_soundfont(soundfont_path, auto_analyze=False, save=False)
-                except Exception as e:
-                    if debug:
-                        print(Fore.RED + f"Debug - Error adding soundfont: {e}" + Style.RESET_ALL)
-                    raise
-                
-                if not sf:
-                    print(Fore.RED + "Error: Failed to add soundfont to manager" + Style.RESET_ALL)
-                    return None
-                
-                # Update metadata
-                if "mapped_notes" in merged_metadata:
-                    mapped_notes = merged_metadata["mapped_notes"]
-                    sf.mapped_notes = MappedNotes(
+                # Create a new SoundfontMetadata object with the merged data
+                mapped_notes = merged_metadata.get("mapped_notes", {})
+                if mapped_notes:
+                    mapped_notes_obj = MappedNotes(
                         min_note=mapped_notes.get("min_note", "C0"),
                         max_note=mapped_notes.get("max_note", "C8"),
                         missing_notes=mapped_notes.get("missing_notes", [])
                     )
+                else:
+                    mapped_notes_obj = MappedNotes()
                 
-                sf.name = merged_metadata.get("name", sf.name)
-                sf.timbre = merged_metadata.get("timbre", sf.timbre)
-                sf.tags = merged_metadata.get("tags", sf.tags)
-                sf.instrument_type = merged_metadata.get("instrument_type", sf.instrument_type)
-                sf.quality = merged_metadata.get("quality", sf.quality)
-                sf.genre = merged_metadata.get("genre", sf.genre)
-                sf.license = merged_metadata.get("license", sf.license)
-                sf.author = merged_metadata.get("author", sf.author)
-                sf.description = merged_metadata.get("description", sf.description)
-                sf.polyphony = merged_metadata.get("polyphony", sf.polyphony)
-                sf.sample_rate = merged_metadata.get("sample_rate", sf.sample_rate)
-                sf.bit_depth = merged_metadata.get("bit_depth", sf.bit_depth)
-                sf.size_mb = merged_metadata.get("size_mb", sf.size_mb)
+                # Create the soundfont metadata object from merged data
+                sf = SoundfontMetadata(
+                    id=manager.next_id,
+                    name=merged_metadata.get("name", ""),
+                    path=manager._get_relative_path(soundfont_path),
+                    timbre=merged_metadata.get("timbre", ""),
+                    tags=merged_metadata.get("tags", []),
+                    instrument_type=merged_metadata.get("instrument_type", ""),
+                    quality=merged_metadata.get("quality", "medium"),
+                    genre=merged_metadata.get("genre", []),
+                    mapped_notes=mapped_notes_obj,
+                    polyphony=merged_metadata.get("polyphony", 32),
+                    sample_rate=merged_metadata.get("sample_rate", 44100),
+                    bit_depth=merged_metadata.get("bit_depth", 16),
+                    size_mb=merged_metadata.get("size_mb", 0.0),
+                    license=merged_metadata.get("license", ""),
+                    author=merged_metadata.get("author", ""),
+                    description=merged_metadata.get("description", ""),
+                    hash=merged_metadata.get("hash", ""),
+                    last_modified=merged_metadata.get("last_modified", 0.0)
+                )
+                
+                # Add the soundfont to the manager
+                manager.soundfonts.append(sf)
+                manager.next_id += 1
+                manager._build_indices()
                 
                 return sf
             else:
-                # Add the soundfont with the automatic metadata
-                try:
-                    return manager.add_soundfont(soundfont_path, auto_analyze=True, save=True)
-                except Exception as e:
-                    if debug:
-                        print(Fore.RED + f"Debug - Error adding soundfont: {e}" + Style.RESET_ALL)
-                    raise
+               
+                rel_path = manager._get_relative_path(soundfont_path)
+                
+                # Criando um objeto completo com todos os metadados
+                mapped_notes = auto_metadata.get("mapped_notes", {})
+                mapped_notes_obj = MappedNotes(
+                    min_note=mapped_notes.get("min_note", "C0"),
+                    max_note=mapped_notes.get("max_note", "C8"),
+                    missing_notes=mapped_notes.get("missing_notes", [])
+                )
+                
+                sf = SoundfontMetadata(
+                    id=manager.next_id,
+                    name=auto_metadata.get("name", ""),
+                    path=rel_path,
+                    timbre=auto_metadata.get("timbre", ""),
+                    tags=auto_metadata.get("tags", []),
+                    instrument_type=auto_metadata.get("instrument_type", ""),
+                    quality=auto_metadata.get("quality", "medium"),
+                    genre=auto_metadata.get("genre", []),
+                    mapped_notes=mapped_notes_obj,
+                    polyphony=auto_metadata.get("polyphony", 32),
+                    sample_rate=auto_metadata.get("sample_rate", 44100),
+                    bit_depth=auto_metadata.get("bit_depth", 16),
+                    size_mb=auto_metadata.get("size_mb", 0.0),
+                    license=auto_metadata.get("license", ""),
+                    author=auto_metadata.get("author", ""),
+                    description=auto_metadata.get("description", ""),
+                    hash=auto_metadata.get("hash", ""),
+                    last_modified=auto_metadata.get("last_modified", 0.0)
+                )
+                
+                # Adicionar ao gerenciador
+                manager.soundfonts.append(sf)
+                manager.next_id += 1
+                manager._build_indices()
+                
+                return sf
         else:
-            # Non-interactive mode, just add with automatic metadata
-            try:
-                return manager.add_soundfont(soundfont_path, auto_analyze=True, save=True)
-            except Exception as e:
-                if debug:
-                    print(Fore.RED + f"Debug - Error adding soundfont: {e}" + Style.RESET_ALL)
-                raise
+            # Modo não-interativo, adicionar com metadados automáticos
+            # Também preservando todos os metadados detectados
+            rel_path = manager._get_relative_path(soundfont_path)
+            
+            # Criando um objeto completo com todos os metadados
+            mapped_notes = auto_metadata.get("mapped_notes", {})
+            mapped_notes_obj = MappedNotes(
+                min_note=mapped_notes.get("min_note", "C0"),
+                max_note=mapped_notes.get("max_note", "C8"),
+                missing_notes=mapped_notes.get("missing_notes", [])
+            )
+            
+            sf = SoundfontMetadata(
+                id=manager.next_id,
+                name=auto_metadata.get("name", ""),
+                path=rel_path,
+                timbre=auto_metadata.get("timbre", ""),
+                tags=auto_metadata.get("tags", []),
+                instrument_type=auto_metadata.get("instrument_type", ""),
+                quality=auto_metadata.get("quality", "medium"),
+                genre=auto_metadata.get("genre", []),
+                mapped_notes=mapped_notes_obj,
+                polyphony=auto_metadata.get("polyphony", 32),
+                sample_rate=auto_metadata.get("sample_rate", 44100),
+                bit_depth=auto_metadata.get("bit_depth", 16),
+                size_mb=auto_metadata.get("size_mb", 0.0),
+                license=auto_metadata.get("license", ""),
+                author=auto_metadata.get("author", ""),
+                description=auto_metadata.get("description", ""),
+                hash=auto_metadata.get("hash", ""),
+                last_modified=auto_metadata.get("last_modified", 0.0)
+            )
+            
+            # Adicionar ao gerenciador
+            manager.soundfonts.append(sf)
+            manager.next_id += 1
+            manager._build_indices()
+            
+            return sf
     
     except Exception as e:
         print(Fore.RED + f"Error annotating {soundfont_path}: {e}" + Style.RESET_ALL)
@@ -629,6 +706,114 @@ def save_progress(manager: SoundfontManager, output_file: str, debug: bool = Fal
             traceback.print_exc()
         return False
 
+def simplified_midi_for_test(output_file: str) -> bool:
+    """Cria um arquivo MIDI simples com apenas três notas centrais para teste."""
+    try:
+        import pretty_midi
+        
+        midi = pretty_midi.PrettyMIDI()
+        instrument = pretty_midi.Instrument(program=0)  # Piano
+        
+        # Apenas três notas simples (C4, E4, G4) com velocidade mais baixa
+        notes = [
+            {"note": 60, "start": 0.0, "end": 0.5, "velocity": 80},  # C4
+            {"note": 64, "start": 0.5, "end": 1.0, "velocity": 80},  # E4
+            {"note": 67, "start": 1.0, "end": 2.0, "velocity": 80},  # G4
+        ]
+        
+        for note_info in notes:
+            note = pretty_midi.Note(
+                velocity=note_info["velocity"],
+                pitch=note_info["note"],
+                start=note_info["start"],
+                end=note_info["end"]
+            )
+            instrument.notes.append(note)
+        
+        midi.instruments.append(instrument)
+        midi.write(output_file)
+        
+        return os.path.exists(output_file)
+    except Exception as e:
+        print(f"Error creating simplified MIDI: {e}")
+        return False
+
+def test_soundfont_simple(soundfont_path: str, wav_output: str, debug: bool = False) -> bool:
+    """Versão simplificada para testar soundfont e gerar WAV."""
+    if not os.path.exists(soundfont_path):
+        if debug:
+            print(f"Error: Soundfont file not found: {soundfont_path}")
+        return False
+    
+    # Verificar se o FluidSynth está disponível
+    fluidsynth_available = False
+    try:
+        result = subprocess.run(['fluidsynth', '--version'], 
+                               stdout=subprocess.PIPE, 
+                               stderr=subprocess.PIPE)
+        fluidsynth_available = (result.returncode == 0)
+    except:
+        if debug:
+            print("Error: FluidSynth not found.")
+        return False
+    
+    if not fluidsynth_available:
+        return False
+    
+    # Criar arquivo MIDI temporário
+    temp_midi = None
+    try:
+        # Criar arquivo MIDI temporário
+        fd, temp_midi = tempfile.mkstemp(suffix=".mid")
+        os.close(fd)
+        
+        if not simplified_midi_for_test(temp_midi):
+            if debug:
+                print("Error creating MIDI file for test.")
+            return False
+        
+        # Renderizar para WAV usando FluidSynth
+        cmd = [
+            'fluidsynth',
+            '-ni',                # No shell interface
+            '-g', '0.7',          # Gain (volume mais baixo)
+            '-F', wav_output,     # Arquivo WAV de saída
+            soundfont_path,       # Soundfont
+            temp_midi             # Arquivo MIDI
+        ]
+        
+        if debug:
+            print(f"Executing command: {' '.join(cmd)}")
+        
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        if result.returncode == 0 and os.path.exists(wav_output) and os.path.getsize(wav_output) > 0:
+            return True
+        else:
+            if debug:
+                print(f"Error rendering: {result.stderr}")
+            return False
+    
+    except Exception as e:
+        if debug:
+            print(f"Error during soundfont test: {e}")
+        return False
+    
+    finally:
+        # Limpar arquivo MIDI temporário
+        if temp_midi and os.path.exists(temp_midi):
+            try:
+                os.remove(temp_midi)
+            except:
+                pass
+    
+    return False
+
 def main() -> None:
     """Main program function."""
     parser = setup_argparse()
@@ -644,6 +829,17 @@ def main() -> None:
         print(Fore.YELLOW + "Continuing without audio playback..." + Style.RESET_ALL)
         args.play = False
     
+    if args.play:
+        audio_available = check_audio_dependencies(args.debug)
+        if not audio_available:
+            print(Fore.YELLOW + "Warning: No audio playback library found." + Style.RESET_ALL)
+            print(Fore.YELLOW + "For a better experience, install at least one of the following libraries:" + Style.RESET_ALL)
+            print(Fore.YELLOW + "  - pygame:     pip install pygame" + Style.RESET_ALL)
+            print(Fore.YELLOW + "  - playsound:  pip install playsound" + Style.RESET_ALL)
+            print(Fore.YELLOW + "  - simpleaudio: pip install simpleaudio" + Style.RESET_ALL)
+            print(Fore.YELLOW + "  - sounddevice: pip install sounddevice soundfile" + Style.RESET_ALL)
+            print(Fore.YELLOW + "Continuing without automatic audio playback..." + Style.RESET_ALL)
+            
     # Initialize soundfont manager
     try:
         manager = SoundfontManager(args.output, args.directory)
