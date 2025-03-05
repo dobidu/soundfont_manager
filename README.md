@@ -267,7 +267,7 @@ The system automatically analyzes the note mapping in soundfonts, including:
 
 - Minimum and maximum playable notes
 - Missing notes in the range
-- Appropriate instrument range detection
+- Enhanced tools for precise detection of note ranges in soundfonts 
 
 ### Similarity Recommendation
 
