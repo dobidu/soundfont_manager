@@ -122,11 +122,16 @@ python sf_annotator.py --directory soundfonts --output library.json
 # Interactive mode with manual data entry
 python sf_annotator.py --directory soundfonts --output library.json --mode interactive
 
+
+
 # Batch processing with manual entry for each soundfont
 python sf_annotator.py --directory soundfonts --output library.json --insert-data
 
 # Recursive scanning with forced reanalysis
 python sf_annotator.py --directory soundfonts --output library.json --recursive --force
+
+# For the most accurate (but resource-intensive) detection of note ranges, use the `--test-note-range` parameter
+python sf_annotator.py --directory soundfonts --output library.json --recursive --test-note-range
 
 # Test playback during annotation
 python sf_annotator.py --directory soundfonts --output library.json --play
@@ -141,7 +146,7 @@ python sf_annotator.py --directory soundfonts --output library.json --no-timbre-
 python sf_annotator.py --directory soundfonts --output library.json --recursive --batch-size 20
 
 # Complete set of options for detailed annotation
-python sf_annotator.py --directory soundfonts --output library.json --mode interactive --recursive --insert-data --play
+python sf_annotator.py --directory soundfonts --output library.json --mode interactive --recursive --insert-data --play --test-note-range
 ```
 
 ### Soundfont Management via API
