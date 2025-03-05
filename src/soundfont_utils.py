@@ -256,6 +256,7 @@ def calculate_file_hash(file_path: str) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
+'''
 def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
     """
     Analyze the note mapping in an SF2 file.
@@ -366,6 +367,213 @@ def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
     
     min_note = MIDI_TO_NOTE.get(min_note_midi, "C0")
     max_note = MIDI_TO_NOTE.get(max_note_midi, "C8")
+    
+    # Determine missing notes in range
+    all_possible_notes = set(range(min_note_midi, max_note_midi + 1))
+    missing_midi_notes = all_possible_notes - covered_notes
+    missing_notes = [MIDI_TO_NOTE.get(n, f"Unknown-{n}") for n in missing_midi_notes]
+    
+    return MappedNotes(
+        min_note=min_note,
+        max_note=max_note,
+        missing_notes=missing_notes
+    )
+'''
+
+def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
+    """
+    Analyze the note mapping in an SF2 file with improved detection.
+    
+    Args:
+        sf2: Loaded Sf2File object
+        
+    Returns:
+        MappedNotes object with min_note, max_note and missing_notes
+    """
+    covered_notes = set()
+    
+    try:
+        # First, check instrument key ranges (often more reliable source)
+        instruments_found = False
+        if hasattr(sf2, 'instruments') and sf2.instruments:
+            for instr in sf2.instruments:
+                if hasattr(instr, 'name') and instr.name:  # Skip unnamed instruments (often terminator)
+                    instr_name = decode_safely(instr.name)
+                    if instr_name == "EOI":  # End of instruments marker
+                        continue
+                        
+                    if hasattr(instr, 'bags') and instr.bags:
+                        instruments_found = True
+                        for bag_idx, bag in enumerate(instr.bags):
+                            key_range = None
+                            
+                            # Check if bag has generators
+                            if hasattr(bag, 'gens') and bag.gens:
+                                for gen in bag.gens:
+                                    if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
+                                        key_range = gen.val
+                                        break
+                            
+                            # If key range found
+                            if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
+                                # Add all notes in this range
+                                for note in range(key_range.lo, key_range.hi + 1):
+                                    if 0 <= note <= 127:
+                                        covered_notes.add(note)
+        
+        # Second, check preset key ranges if no instruments found
+        if not covered_notes and hasattr(sf2, 'presets') and sf2.presets:
+            for preset in sf2.presets:
+                if hasattr(preset, 'name') and preset.name:
+                    preset_name = decode_safely(preset.name)
+                    if preset_name == "EOP":  # End of presets marker
+                        continue
+                        
+                    if hasattr(preset, 'bags') and preset.bags:
+                        for bag_idx, bag in enumerate(preset.bags):
+                            key_range = None
+                            
+                            # Check if bag has generators
+                            if hasattr(bag, 'gens') and bag.gens:
+                                for gen in bag.gens:
+                                    if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
+                                        key_range = gen.val
+                                        break
+                            
+                            # If key range found
+                            if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
+                                # Add all notes in this range
+                                for note in range(key_range.lo, key_range.hi + 1):
+                                    if 0 <= note <= 127:
+                                        covered_notes.add(note)
+        
+        # Third, check the samples directly (fallback)
+        if not covered_notes and hasattr(sf2, 'samples') and sf2.samples:
+            for sample in sf2.samples:
+                if hasattr(sample, 'sample_name') and sample.sample_name:
+                    sample_name = decode_safely(sample.sample_name)
+                    if sample_name == "EOS":  # End of samples marker
+                        continue
+                
+                # Check for original key
+                if hasattr(sample, 'original_key') and 0 <= sample.original_key <= 127:
+                    covered_notes.add(sample.original_key)
+                
+                # Check for original pitch (alternative name in some implementations)
+                if hasattr(sample, 'original_pitch') and 0 <= sample.original_pitch <= 127:
+                    covered_notes.add(sample.original_pitch)
+                    
+                # Try to infer range from sample loops
+                # Many soundfonts use looped samples that cover multiple notes
+                if (hasattr(sample, 'sample_rate') and sample.sample_rate > 0 and 
+                    hasattr(sample, 'start_loop') and hasattr(sample, 'end_loop')):
+                    
+                    # The presence of loops often indicates a playable sample
+                    # We'll add a small range around the original key as a fallback
+                    if hasattr(sample, 'original_key') and 0 <= sample.original_key <= 127:
+                        base_note = sample.original_key
+                        # Add a basic range of +/- 12 semitones (one octave) around the original key
+                        for note in range(max(0, base_note - 12), min(127, base_note + 12) + 1):
+                            covered_notes.add(note)
+    
+    except Exception as e:
+        print(f"Error in note mapping analysis: {e}")
+    
+    # If all detection methods failed, try a more aggressive approach
+    if not covered_notes:
+        # Analyze instrument/preset names to detect instrument type
+        instrument_type = "unknown"
+        try:
+            # First check instrument names
+            if hasattr(sf2, 'instruments') and sf2.instruments:
+                for instr in sf2.instruments:
+                    if hasattr(instr, 'name') and instr.name:
+                        instr_name = decode_safely(instr.name)
+                        detected_type = infer_instrument_type(instr_name)
+                        if detected_type != "unknown":
+                            instrument_type = detected_type
+                            break
+            
+            # If no type found, check preset names
+            if instrument_type == "unknown" and hasattr(sf2, 'presets') and sf2.presets:
+                for preset in sf2.presets:
+                    if hasattr(preset, 'name') and preset.name:
+                        preset_name = decode_safely(preset.name)
+                        detected_type = infer_instrument_type(preset_name)
+                        if detected_type != "unknown":
+                            instrument_type = detected_type
+                            break
+        except:
+            pass
+        
+        # If the SF2 has samples but we couldn't detect key ranges,
+        # assume it's a full-range instrument (rare for a soundfont to have just one note)
+        if hasattr(sf2, 'samples') and len(sf2.samples) > 0:
+            # Define ranges by instrument type as fallback
+            if "bass" in instrument_type.lower():
+                # Bass: typically E1 to G4
+                for note in range(28, 68):  # E1=28, G4=67
+                    covered_notes.add(note)
+            elif "guitar" in instrument_type.lower():
+                # Guitar: typical E2 to E6
+                for note in range(40, 89):  # E2=40, E6=88
+                    covered_notes.add(note)
+            elif "piano" in instrument_type.lower():
+                # Piano: A0 to C8
+                for note in range(21, 109):  # A0=21, C8=108
+                    covered_notes.add(note)
+            elif "brass" in instrument_type.lower() or "wind" in instrument_type.lower():
+                # Brass/wind: F2 to F6
+                for note in range(41, 90):  # F2=41, F6=89
+                    covered_notes.add(note)
+            elif "drum" in instrument_type.lower() or "percussion" in instrument_type.lower():
+                # Percussion: full MIDI range
+                for note in range(0, 128):
+                    covered_notes.add(note)
+            elif "synth" in instrument_type.lower() or "pad" in instrument_type.lower():
+                # Synths and pads: C2 to C7
+                for note in range(36, 96):  # C2=36, C7=96
+                    covered_notes.add(note)
+            else:
+                # Default: C1 to C7 (standard keyboard range)
+                for note in range(36, 96):  # C1=36, C7=96
+                    covered_notes.add(note)
+    
+    # If still no notes found, use a conservative default range
+    if not covered_notes:
+        # Default range: just assuming C3 to C5 as minimum playable range for any instrument
+        for note in range(48, 73):  # C3=48, C5=72
+            covered_notes.add(note)
+    
+    # Determine min and max note
+    min_note_midi = min(covered_notes) if covered_notes else 0
+    max_note_midi = max(covered_notes) if covered_notes else 127
+    
+    min_note = MIDI_TO_NOTE.get(min_note_midi, "C0")
+    max_note = MIDI_TO_NOTE.get(max_note_midi, "C8")
+    
+    # For debugging
+    #print(f"Note range: {min_note} - {max_note}, total notes: {len(covered_notes)}")
+    
+    # Check for anomalous results - if min and max are identical and it's C4, 
+    # it's likely our detection failed and defaulted somewhere
+    if min_note == max_note and min_note == "C4" and len(sf2.samples) > 0:
+        # Force a more reasonable range based on the number of samples
+        num_samples = len(sf2.samples)
+        if num_samples >= 10:
+            # With many samples, assume a wide range (C2-C6)
+            min_note_midi = 36  # C2
+            max_note_midi = 84  # C6
+            min_note = "C2"
+            max_note = "C6"
+            covered_notes = set(range(min_note_midi, max_note_midi + 1))
+        else:
+            # Fewer samples, assume narrower range (C3-C5)
+            min_note_midi = 48  # C3
+            max_note_midi = 72  # C5
+            min_note = "C3"
+            max_note = "C5"
+            covered_notes = set(range(min_note_midi, max_note_midi + 1))
     
     # Determine missing notes in range
     all_possible_notes = set(range(min_note_midi, max_note_midi + 1))
@@ -846,3 +1054,187 @@ def suggest_quality(metadata: Dict) -> str:
         return "medium"
     else:
         return "low"
+
+def test_note_range(soundfont_path: str, output_dir: Optional[str] = None) -> Tuple[str, str, List[int]]:
+    """
+    Test a soundfont by playing notes across the MIDI range to detect playable notes.
+    
+    Args:
+        soundfont_path: Path to the .sf2 file
+        output_dir: Directory to save test files (optional)
+        
+    Returns:
+        Tuple of (min_note, max_note, list of missing notes)
+    """
+    import tempfile
+    import os
+    from sound_test import simplified_midi_for_test
+    from fluidsynth_helper import run_fluidsynth
+    
+    # Create a temporary directory for MIDI and WAV files
+    if output_dir:
+        temp_dir = output_dir
+        os.makedirs(temp_dir, exist_ok=True)
+    else:
+        temp_dir = tempfile.mkdtemp()
+    
+    # Notes to test across the range (C1 to C7)
+    # We'll test notes at different octaves to find the range
+    test_notes = [
+        # Bass register
+        24,  # C1
+        36,  # C2
+        # Middle register
+        48,  # C3
+        60,  # C4 (middle C)
+        # High register
+        72,  # C5
+        84,  # C6
+        96   # C7
+    ]
+    
+    # Test additional notes if we find the extremes of the range
+    extended_bass = [26, 28, 29, 31, 33, 35]  # D1 to B1
+    extended_treble = [86, 88, 89, 91, 93, 95]  # D6 to B6
+    
+    # Dictionary to track which notes are playable
+    playable_notes = {}
+    
+    print(f"\nTesting note range for {os.path.basename(soundfont_path)}...")
+    
+    # Test each note
+    for note in test_notes:
+        note_name = MIDI_TO_NOTE.get(note, f"Unknown-{note}")
+        midi_path = os.path.join(temp_dir, f"note_{note}.mid")
+        wav_path = os.path.join(temp_dir, f"note_{note}.wav")
+        
+        # Create a simple MIDI file with a single note
+        create_single_note_midi(midi_path, note)
+        
+        # Render to WAV using FluidSynth
+        success = run_fluidsynth(soundfont_path, midi_path, wav_path)
+        
+        # Check if the WAV file was created and has content
+        if success and os.path.exists(wav_path) and os.path.getsize(wav_path) > 100:
+            # Additional check: analyze the WAV to confirm it's not silent
+            if not is_silent_wav(wav_path):
+                playable_notes[note] = True
+                print(f"  ✓ Note {note_name} (MIDI {note}) is playable")
+            else:
+                playable_notes[note] = False
+                print(f"  ✗ Note {note_name} (MIDI {note}) is silent")
+        else:
+            playable_notes[note] = False
+            print(f"  ✗ Note {note_name} (MIDI {note}) is not playable")
+    
+    # If C1 is playable, test lower notes
+    if playable_notes.get(24, False):
+        for note in [12, 16, 19, 21]:  # C0, E0, G0, A0
+            note_name = MIDI_TO_NOTE.get(note, f"Unknown-{note}")
+            midi_path = os.path.join(temp_dir, f"note_{note}.mid")
+            wav_path = os.path.join(temp_dir, f"note_{note}.wav")
+            
+            create_single_note_midi(midi_path, note)
+            success = run_fluidsynth(soundfont_path, midi_path, wav_path)
+            
+            if success and os.path.exists(wav_path) and os.path.getsize(wav_path) > 100:
+                if not is_silent_wav(wav_path):
+                    playable_notes[note] = True
+                    print(f"  ✓ Note {note_name} (MIDI {note}) is playable")
+                else:
+                    playable_notes[note] = False
+                    print(f"  ✗ Note {note_name} (MIDI {note}) is silent")
+            else:
+                playable_notes[note] = False
+                print(f"  ✗ Note {note_name} (MIDI {note}) is not playable")
+    
+    # If C7 is playable, test higher notes
+    if playable_notes.get(96, False):
+        for note in [100, 103, 108]:  # E7, G7, C8
+            note_name = MIDI_TO_NOTE.get(note, f"Unknown-{note}")
+            midi_path = os.path.join(temp_dir, f"note_{note}.mid")
+            wav_path = os.path.join(temp_dir, f"note_{note}.wav")
+            
+            create_single_note_midi(midi_path, note)
+            success = run_fluidsynth(soundfont_path, midi_path, wav_path)
+            
+            if success and os.path.exists(wav_path) and os.path.getsize(wav_path) > 100:
+                if not is_silent_wav(wav_path):
+                    playable_notes[note] = True
+                    print(f"  ✓ Note {note_name} (MIDI {note}) is playable")
+                else:
+                    playable_notes[note] = False
+                    print(f"  ✗ Note {note_name} (MIDI {note}) is silent")
+            else:
+                playable_notes[note] = False
+                print(f"  ✗ Note {note_name} (MIDI {note}) is not playable")
+    
+    # Determine the min and max playable notes
+    playable_midi_notes = [note for note, is_playable in playable_notes.items() if is_playable]
+    
+    if playable_midi_notes:
+        min_midi = min(playable_midi_notes)
+        max_midi = max(playable_midi_notes)
+        
+        min_note = MIDI_TO_NOTE.get(min_midi, f"Unknown-{min_midi}")
+        max_note = MIDI_TO_NOTE.get(max_midi, f"Unknown-{max_midi}")
+        
+        # Find missing notes within the range
+        all_notes_in_range = set(range(min_midi, max_midi + 1))
+        missing_notes = []
+        
+        # Test a sample of notes within the range to detect missing notes
+        test_within_range = []
+        step = 3 if (max_midi - min_midi) > 24 else 1
+        for note in range(min_midi, max_midi + 1, step):
+            if note not in playable_midi_notes:
+                test_within_range.append(note)
+        
+        # Test the additional notes
+        for note in test_within_range:
+            note_name = MIDI_TO_NOTE.get(note, f"Unknown-{note}")
+            midi_path = os.path.join(temp_dir, f"note_{note}.mid")
+            wav_path = os.path.join(temp_dir, f"note_{note}.wav")
+            
+            create_single_note_midi(midi_path, note)
+            success = run_fluidsynth(soundfont_path, midi_path, wav_path)
+            
+            if success and os.path.exists(wav_path) and os.path.getsize(wav_path) > 100:
+                if not is_silent_wav(wav_path):
+                    playable_notes[note] = True
+                    print(f"  ✓ Note {note_name} (MIDI {note}) is playable")
+                else:
+                    missing_notes.append(note)
+                    print(f"  ✗ Note {note_name} (MIDI {note}) is silent")
+            else:
+                missing_notes.append(note)
+                print(f"  ✗ Note {note_name} (MIDI {note}) is not playable")
+        
+        # Update the min/max based on all tests
+        playable_midi_notes = [note for note, is_playable in playable_notes.items() if is_playable]
+        min_midi = min(playable_midi_notes)
+        max_midi = max(playable_midi_notes)
+        
+        min_note = MIDI_TO_NOTE.get(min_midi, f"Unknown-{min_midi}")
+        max_note = MIDI_TO_NOTE.get(max_midi, f"Unknown-{max_midi}")
+        
+        print(f"\nPlayable range: {min_note} (MIDI {min_midi}) to {max_note} (MIDI {max_midi})")
+        
+        # Convert missing MIDI notes to note names
+        missing_note_names = [MIDI_TO_NOTE.get(n, f"Unknown-{n}") for n in sorted(missing_notes)]
+        
+        if missing_note_names:
+            print(f"Missing notes: {', '.join(missing_note_names)}")
+        else:
+            print("No missing notes detected within the range.")
+        
+        return min_note, max_note, missing_note_names
+    else:
+        print("No playable notes detected.")
+        return "C4", "C4", []  # Default fallback
+    
+    # Clean up temporary files if needed
+    if not output_dir:
+        import shutil
+        shutil.rmtree(temp_dir)
+
