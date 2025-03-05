@@ -8,6 +8,7 @@ This system provides a complete suite of tools for working with soundfont (SF2) 
 
 - **Automatic extraction** of technical metadata directly from SF2 files
 - **Acoustic analysis** for automated timbre classification
+- **Advanced Note Mapping** for precise detection of note ranges in soundfonts
 - **Efficient indexing system** for searching and filtering
 - **Advanced API** for soundfont selection and management
 - **Integrated music generation** with MIDI and soundfonts
@@ -121,8 +122,6 @@ python sf_annotator.py --directory soundfonts --output library.json
 
 # Interactive mode with manual data entry
 python sf_annotator.py --directory soundfonts --output library.json --mode interactive
-
-
 
 # Batch processing with manual entry for each soundfont
 python sf_annotator.py --directory soundfonts --output library.json --insert-data
