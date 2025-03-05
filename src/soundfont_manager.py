@@ -18,8 +18,10 @@ from soundfont_utils import (
     generate_tag_suggestions,
     suggest_genres,
     suggest_quality,
-    create_test_midi
+    create_test_midi,
 )
+
+from fluidsynth_helper import run_fluidsynth
 
 class SoundfontManager:
     """
@@ -198,7 +200,7 @@ class SoundfontManager:
             # Ensure directory exists
             os.makedirs(os.path.dirname(os.path.abspath(self.json_path)), exist_ok=True)
             
-            # Save to JSON file
+            # Save to JSON file with prettier formatting
             with open(self.json_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         
@@ -274,6 +276,7 @@ class SoundfontManager:
             except:
                 metadata["size_mb"] = 0.0
         
+        # Crie objeto SoundfontMetadata preservando todos os metadados
         sf = SoundfontMetadata(
             id=self.next_id,
             name=metadata.get("name", os.path.basename(sf2_path).replace('.sf2', '')),
@@ -858,8 +861,12 @@ class SoundfontManager:
                 stats["authors"][sf.author] += 1
             
             # Size - ensure it's a number
-            size = float(sf.size_mb) if sf.size_mb and sf.size_mb > 0 else 0.0
-            total_size += size
+            try:
+                size = float(sf.size_mb) if sf.size_mb and sf.size_mb > 0 else 0.0
+                total_size += size
+            except (ValueError, TypeError):
+                # Ignore conversion errors
+                pass
         
         # Calculate average size
         stats["total_size_mb"] = total_size
@@ -875,35 +882,48 @@ class SoundfontManager:
         
         return stats
     
-    def play_soundfont(self, sf: Union[SoundfontMetadata, int], midi_file: Optional[str] = None) -> None:
+    def play_soundfont(self, sf: Union[SoundfontMetadata, int], midi_file: Optional[str] = None) -> bool:
         """
         Play a soundfont using a MIDI file.
         
         Args:
             sf: SoundfontMetadata object or ID
             midi_file: Path to the MIDI file (if None, create a test file)
-        """
-        # Get absolute path to soundfont
-        sf_path = self.get_absolute_path(sf)
-        
-        # If no MIDI file provided, create one
-        temp_midi = False
-        if not midi_file:
-            midi_file = create_test_midi()
-            temp_midi = True
-        
-        try:
-            # Escape paths for shell
-            escaped_sf_path = shlex.quote(sf_path)
-            escaped_midi_file = shlex.quote(midi_file)
             
-            # Play MIDI using FluidSynth
-            os.system(f"fluidsynth -a alsa -g 1.0 {escaped_sf_path} {escaped_midi_file}")
+        Returns:
+            True if playback successful, False otherwise
+        """
+        try:
+            # Get absolute path to soundfont
+            sf_path = self.get_absolute_path(sf)
+            
+            # Create a test MIDI file if none provided
+            temp_midi = False
+            if not midi_file:
+                midi_file = create_test_midi()
+                temp_midi = True
+            
+            # Método centralizado para executar FluidSynth
+            print(f"Playing soundfont: {sf_path}")
+            print(f"with MIDI file: {midi_file}")
+            
+            # Use o método de soundfont_utils para reproduzir
+            from soundfont_utils import run_fluidsynth
+            success = run_fluidsynth(sf_path, midi_file, None)
+            
+            return success
+        
+        except Exception as e:
+            print(f"Error playing soundfont: {e}")
+            return False
         
         finally:
             # Remove temporary MIDI file
-            if temp_midi and os.path.exists(midi_file):
-                os.remove(midi_file)
+            if temp_midi and midi_file and os.path.exists(midi_file):
+                try:
+                    os.remove(midi_file)
+                except:
+                    pass
     
     def analyze_soundfont(self, sf_id: int, update_db: bool = True) -> Dict:
         """
