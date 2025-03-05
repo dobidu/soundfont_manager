@@ -5,11 +5,14 @@ Helper module for working with FluidSynth
 
 import os
 import platform
+import shutil
 import subprocess
 import tempfile
 import shlex
 import sys
 from typing import Optional, Tuple, List
+
+from sound_test import play_wav_simple
 
 def detect_audio_driver() -> str:
     """
@@ -207,15 +210,6 @@ def play_soundfont(
     if audio_driver is None:
         audio_driver = detect_audio_driver()
     
-    # Escape paths
-    if platform.system().lower() == 'windows':
-        # Windows needs special handling with quotes
-        escaped_sf_path = f'"{soundfont_path}"'
-        escaped_midi_file = f'"{midi_file}"'
-    else:
-        escaped_sf_path = shlex.quote(soundfont_path)
-        escaped_midi_file = shlex.quote(midi_file)
-    
     # Build command
     cmd = [
         fluidsynth_path,
@@ -230,20 +224,16 @@ def play_soundfont(
         cmd.append('-q')  # Quiet mode
     
     # Add soundfont and MIDI file
-    cmd.append(escaped_sf_path)
-    cmd.append(escaped_midi_file)
-    
-    # Command as string for shell execution
-    cmd_str = ' '.join(cmd)
+    cmd.append(soundfont_path)
+    cmd.append(midi_file)
     
     try:
         if verbose:
-            print(f"Running: {cmd_str}")
-            result = subprocess.run(cmd_str, shell=True)
+            print(f"Running FluidSynth with: {' '.join(cmd)}")
+            result = subprocess.run(cmd)
         else:
             result = subprocess.run(
-                cmd_str, 
-                shell=True,
+                cmd, 
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -251,6 +241,87 @@ def play_soundfont(
     except Exception as e:
         if verbose:
             print(f"Error playing soundfont: {e}")
+        return False
+
+def render_midi_to_wav(
+    soundfont_path: str, 
+    midi_file: str, 
+    output_wav: str, 
+    audio_driver: Optional[str] = None, 
+    gain: float = 1.0,
+    sample_rate: int = 44100,
+    verbose: bool = False
+) -> bool:
+    """
+    Render a MIDI file to a WAV file using a soundfont via FluidSynth.
+    
+    Args:
+        soundfont_path: Path to the .sf2 file
+        midi_file: Path to the MIDI file
+        output_wav: Path to the output WAV file
+        audio_driver: Audio driver to use (auto-detect if None)
+        gain: Audio gain (volume) - default 1.0
+        sample_rate: Audio sample rate - default 44100
+        verbose: If True, print detailed output
+        
+    Returns:
+        True if rendering was successful, False otherwise
+    """
+    # Find FluidSynth
+    fluidsynth_path = find_fluidsynth_executable()
+    if not fluidsynth_path:
+        if verbose:
+            print("Error: FluidSynth not found. Please install it or add it to your PATH.")
+        return False
+    
+    # Check if files exist
+    if not os.path.exists(soundfont_path):
+        if verbose:
+            print(f"Error: Soundfont file not found: {soundfont_path}")
+        return False
+    
+    if not os.path.exists(midi_file):
+        if verbose:
+            print(f"Error: MIDI file not found: {midi_file}")
+        return False
+    
+    # Build command
+    cmd = [
+        fluidsynth_path,
+        '-nli',                    # No MIDI in, no GUI, no shell
+        '-g', str(gain),           # Gain
+        '-r', str(sample_rate),    # Sample rate
+        '-F', output_wav,          # Output file
+        soundfont_path,            # Soundfont file
+        midi_file                  # MIDI file
+    ]
+    
+    try:
+        if verbose:
+            print(f"Running FluidSynth to render: {' '.join(cmd)}")
+            result = subprocess.run(cmd)
+        else:
+            result = subprocess.run(
+                cmd, 
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+        
+        if result.returncode != 0:
+            if verbose:
+                print(f"FluidSynth returned error code: {result.returncode}")
+            return False
+        
+        # Check if output file was created
+        if not os.path.exists(output_wav):
+            if verbose:
+                print(f"Output file was not created: {output_wav}")
+            return False
+        
+        return True
+    except Exception as e:
+        if verbose:
+            print(f"Error rendering MIDI to WAV: {e}")
         return False
 
 def get_available_audio_drivers() -> List[str]:
@@ -293,10 +364,54 @@ def get_available_audio_drivers() -> List[str]:
                     driver = line.split(':')[0].strip()
                     if driver:
                         drivers.append(driver)
+                else:
+                    # End of drivers section
+                    in_drivers_section = False
         
         return drivers
     except:
         return []
+
+def run_fluidsynth(sf2_path: str, midi_file: str, output_wav: Optional[str] = None, audio_driver: Optional[str] = None) -> bool:
+    """
+    Run FluidSynth to either play a MIDI file or render it to a WAV file.
+    
+    Args:
+        sf2_path: Path to the .sf2 file
+        midi_file: Path to the MIDI file
+        output_wav: Path to the output WAV file (if None, play directly)
+        audio_driver: Audio driver to use (auto-detect if None)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    from sound_test import test_soundfont
+    
+    if output_wav:
+        # Rendering mode
+        success, _ = test_soundfont(sf2_path, False, output_wav)
+        return success
+    else:
+        # Playback mode - tente gerar um WAV temporário e reproduzi-lo
+        temp_dir = tempfile.mkdtemp()
+        wav_path = os.path.join(temp_dir, "fluidsynth_temp.wav")
+        
+        try:
+            success, wav_file = test_soundfont(sf2_path, False, wav_path)
+            
+            if success and wav_file:
+                from sound_test import play_wav
+                return play_wav_simple(wav_file, debug=False)
+            
+            return False
+        
+        finally:
+            # Limpar arquivos temporários
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except:
+                pass
 
 def install_instructions() -> str:
     """
@@ -354,6 +469,8 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true", help="Check FluidSynth installation")
     parser.add_argument("--drivers", action="store_true", help="List available audio drivers")
     parser.add_argument("--play", nargs=2, metavar=("SOUNDFONT", "MIDI"), help="Play MIDI file with soundfont")
+    parser.add_argument("--render", nargs=3, metavar=("SOUNDFONT", "MIDI", "WAV"), help="Render MIDI file to WAV")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show verbose output")
     
     args = parser.parse_args()
     
@@ -383,9 +500,18 @@ if __name__ == "__main__":
     elif args.play:
         soundfont_path, midi_file = args.play
         print(f"Playing {midi_file} with {soundfont_path}...")
-        success = play_soundfont(soundfont_path, midi_file, verbose=True)
+        success = play_soundfont(soundfont_path, midi_file, verbose=args.verbose)
         if not success:
             print("Failed to play. Check if FluidSynth is installed correctly.")
+    
+    elif args.render:
+        soundfont_path, midi_file, wav_file = args.render
+        print(f"Rendering {midi_file} with {soundfont_path} to {wav_file}...")
+        success = render_midi_to_wav(soundfont_path, midi_file, wav_file, verbose=args.verbose)
+        if success:
+            print(f"Successfully rendered to {wav_file}")
+        else:
+            print("Failed to render. Check if FluidSynth is installed correctly.")
     
     else:
         parser.print_help()
