@@ -1,9 +1,9 @@
 import os
-import json
+import shutil
 import numpy as np
 import pretty_midi
-import shlex
 import logging
+import tempfile
 from typing import Dict, List, Optional, Tuple, Set, Any
 from dataclasses import dataclass, asdict, field
 from sf2utils.sf2parse import Sf2File
@@ -268,51 +268,97 @@ def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
     """
     covered_notes = set()
     
-    # Analyze all presets and their zones
-    if hasattr(sf2, 'presets'):
-        for preset in sf2.presets:
-            if hasattr(preset, 'bags'):
-                for bag in preset.bags:
-                    # Check if the bag has generators
-                    if hasattr(bag, 'gens') and bag.gens:
+    try:
+        # Primeiro, verificar os presets e seus bags
+        if hasattr(sf2, 'presets') and sf2.presets:
+            for preset in sf2.presets:
+                if hasattr(preset, 'bags') and preset.bags:
+                    for bag_idx, bag in enumerate(preset.bags):
                         key_range = None
                         
-                        # Look for key range generator
-                        for gen in bag.gens:
-                            if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
-                                key_range = gen.val
-                                break
+                        # Verificar se o bag tem geradores
+                        if hasattr(bag, 'gens') and bag.gens:
+                            for gen in bag.gens:
+                                if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
+                                    key_range = gen.val
+                                    break
                         
-                        # If found a key range
+                        # Se encontrou um key range
                         if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
-                            # Add all notes in this range
+                            # Adicionar todas as notas neste range
                             for note in range(key_range.lo, key_range.hi + 1):
                                 if 0 <= note <= 127:
                                     covered_notes.add(note)
-    
-    # If no notes found, check instruments and samples
-    if not covered_notes and hasattr(sf2, 'instruments'):
-        for instrument in sf2.instruments:
-            if hasattr(instrument, 'bags'):
-                for bag in instrument.bags:
-                    if hasattr(bag, 'gens') and bag.gens:
+        
+        # Segundo, verificar instrumentos e seus bags
+        if (not covered_notes) and hasattr(sf2, 'instruments') and sf2.instruments:
+            for instr in sf2.instruments:
+                if hasattr(instr, 'bags') and instr.bags:
+                    for bag in instr.bags:
                         key_range = None
                         
-                        for gen in bag.gens:
-                            if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
-                                key_range = gen.val
-                                break
+                        if hasattr(bag, 'gens') and bag.gens:
+                            for gen in bag.gens:
+                                if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
+                                    key_range = gen.val
+                                    break
                         
                         if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
                             for note in range(key_range.lo, key_range.hi + 1):
                                 if 0 <= note <= 127:
                                     covered_notes.add(note)
+        
+        # Terceiro, verificar as amostras diretamente
+        if (not covered_notes) and hasattr(sf2, 'samples') and sf2.samples:
+            for sample in sf2.samples:
+                if hasattr(sample, 'original_key') and 0 <= sample.original_key <= 127:
+                    covered_notes.add(sample.original_key)
+                if hasattr(sample, 'original_pitch') and 0 <= sample.original_pitch <= 127:
+                    covered_notes.add(sample.original_pitch)
     
-    # If still no notes, check directly samples
-    if not covered_notes and hasattr(sf2, 'samples'):
-        for sample in sf2.samples:
-            if hasattr(sample, 'original_pitch'):
-                covered_notes.add(sample.original_pitch)
+    except Exception as e:
+        print(f"Error in note mapping analysis: {e}")
+    
+    # Se nenhuma nota foi detectada, use um intervalo padrão com base no tipo de instrumento
+    if not covered_notes:
+        # Tente inferir um range padrão baseado nos nomes dos presets
+        instrument_type = "unknown"
+        try:
+            if hasattr(sf2, 'presets') and sf2.presets:
+                for preset in sf2.presets:
+                    if hasattr(preset, 'name'):
+                        preset_name = decode_safely(preset.name)
+                        instrument_type = infer_instrument_type(preset_name)
+                        if instrument_type != "unknown":
+                            break
+        except:
+            pass
+        
+        # Defina intervalos padrão por tipo de instrumento
+        if "bass" in instrument_type.lower():
+            # Baixo: tipicamente E1 até G4
+            for note in range(28, 67):  # E1=28, G4=67
+                covered_notes.add(note)
+        elif "guitar" in instrument_type.lower():
+            # Guitarra: típica E2 até E6
+            for note in range(40, 88):  # E2=40, E6=88
+                covered_notes.add(note)
+        elif "piano" in instrument_type.lower():
+            # Piano: A0 até C8
+            for note in range(21, 108):  # A0=21, C8=108
+                covered_notes.add(note)
+        elif "brass" in instrument_type.lower() or "wind" in instrument_type.lower():
+            # Metais/sopro: F2 até F6
+            for note in range(41, 89):  # F2=41, F6=89
+                covered_notes.add(note)
+        elif "drum" in instrument_type.lower() or "percussion" in instrument_type.lower():
+            # Percussão: toda a faixa de MIDI
+            for note in range(0, 128):
+                covered_notes.add(note)
+        else:
+            # Padrão: C1 até C7
+            for note in range(36, 96):  # C1=36, C7=96
+                covered_notes.add(note)
     
     # Determine min and max note
     min_note_midi = min(covered_notes) if covered_notes else 0
@@ -342,16 +388,22 @@ def estimate_polyphony(sf2: Sf2File) -> int:
     Returns:
         Estimated polyphony value
     """
-    # Simple heuristic: count number of samples
+    # Contagem de amostras
     num_samples = len(sf2.samples) if hasattr(sf2, 'samples') else 0
     
-    # Most SF2s support at least 32 voices
-    if num_samples <= 10:
+    # Contagem de instrumentos
+    num_instruments = len(sf2.instruments) if hasattr(sf2, 'instruments') else 0
+    
+    # Calcular uma pontuação para estimar a polifonia
+    score = num_samples * 0.7 + num_instruments * 0.3
+    
+    # Classificar com base na pontuação
+    if score <= 10:
         return 32
-    elif num_samples <= 50:
+    elif score <= 30:
         return 64
     else:
-        return 128  # Large soundfonts usually support 128 voices
+        return 128  # Grande soundfonts geralmente suportam 128 vozes
 
 def infer_instrument_type(preset_name: str) -> str:
     """
@@ -400,7 +452,25 @@ def infer_instrument_type(preset_name: str) -> str:
         "effect": "effects",
         "choir": "vocal",
         "voice": "vocal",
-        "vocal": "vocal"
+        "vocal": "vocal",
+        "rhodes": "keyboard",
+        "wurlitzer": "keyboard",
+        "mellotron": "keyboard",
+        "clavi": "keyboard",
+        "epiano": "keyboard",
+        "e-piano": "keyboard",
+        "electric piano": "keyboard",
+        "electric bass": "bass",
+        "acoustic bass": "bass",
+        "orch": "orchestral",
+        "ensemble": "ensemble",
+        "orchestra": "orchestral",
+        "marimba": "percussion",
+        "vibraphone": "percussion",
+        "xylophone": "percussion",
+        "cymbal": "percussion",
+        "harp": "harp",
+        "mallet": "percussion"        
     }
     
     # Check if any keyword is in the preset name
@@ -414,7 +484,7 @@ def infer_instrument_type(preset_name: str) -> str:
         if keyword in basename:
             return instrument_type
     
-    return "other"
+    return "unknown"
 
 def analyze_timbre(sf2_path: str, midi_test_file: Optional[str] = None) -> Dict:
     """
@@ -441,91 +511,88 @@ def analyze_timbre(sf2_path: str, midi_test_file: Optional[str] = None) -> Dict:
     }
     
     try:
-        # If no test MIDI file is provided, create one
-        if not midi_test_file:
-            midi_test_file = create_test_midi()
+        from sound_test import test_soundfont
         
-        # Generate a WAV file using the soundfont
-        wav_file = "temp_timbre_analysis.wav"
+        # Gerar um arquivo WAV com o teste de som
+        temp_dir = tempfile.mkdtemp()
+        wav_path = os.path.join(temp_dir, "timbre_analysis.wav")
         
-        # Escape special characters in file paths
-        quoted_sf2_path = shlex.quote(sf2_path)
-        quoted_midi_file = shlex.quote(midi_test_file)
-        quoted_wav_file = shlex.quote(wav_file)
+        success, actual_wav_path = test_soundfont(sf2_path, False, wav_path)
         
-        # Run fluidsynth with properly escaped paths
-        os.system(f"fluidsynth -nli -r 44100 -g 1.0 -F {quoted_wav_file} {quoted_sf2_path} {quoted_midi_file} >/dev/null 2>&1")
+        if not success or not actual_wav_path:
+            print("Warning: Failed to generate test audio for timbre analysis")
+            return default_timbre
         
         # Load the WAV file with librosa
-        if os.path.exists(wav_file) and os.path.getsize(wav_file) > 0:
-            try:
-                y, sr = librosa.load(wav_file, sr=None)
-                
-                # Extract timbre features
-                spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr).mean()
-                spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr).mean()
-                spectral_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr).mean()
-                zero_crossing_rate = librosa.feature.zero_crossing_rate(y).mean()
-                
-                # Extract MFCCs
-                mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-                mfcc_means = mfccs.mean(axis=1)
-                
-                # Analyze harmonicity
-                harmonics = librosa.effects.harmonic(y)
-                percussive = librosa.effects.percussive(y)
-                harmonic_ratio = np.sum(harmonics**2) / (np.sum(percussive**2) + 1e-8)
-                
-                # Classify features
-                brightness = map_value_to_category(spectral_centroid, 
-                                                [500, 1500, 3000], 
-                                                ["dark", "medium", "bright", "very bright"])
-                
-                richness = map_value_to_category(spectral_bandwidth,
-                                              [500, 1500, 3000],
-                                              ["simple", "medium", "rich", "very rich"])
-                
-                attack_quality = map_value_to_category(zero_crossing_rate * 10000,
-                                                    [50, 150, 300],
-                                                    ["soft", "medium", "hard", "aggressive"])
-                
-                harmonic_quality = map_value_to_category(harmonic_ratio,
-                                                      [0.5, 2, 5],
-                                                      ["percussive", "balanced", "harmonic", "very harmonic"])
-                
-                # Clean up temp files
-                if os.path.exists(wav_file):
-                    os.remove(wav_file)
-                if os.path.exists(midi_test_file) and midi_test_file.startswith("temp_"):
-                    os.remove(midi_test_file)
-                
-                return {
-                    "brightness": brightness,
-                    "richness": richness,
-                    "attack": attack_quality,
-                    "harmonic_quality": harmonic_quality,
-                    "spectral_centroid": float(spectral_centroid),
-                    "spectral_bandwidth": float(spectral_bandwidth),
-                    "spectral_rolloff": float(spectral_rolloff),
-                    "zero_crossing_rate": float(zero_crossing_rate),
-                    "mfcc_features": [float(x) for x in mfcc_means]
-                }
-            except Exception as e:
-                print(f"Warning: Error in audio analysis: {e}")
-    
+        try:
+            y, sr = librosa.load(actual_wav_path, sr=None)
+            
+            # Verifique se o áudio contém dados reais
+            if len(y) == 0 or np.all(y == 0):
+                print("Warning: Generated audio file is empty or silent")
+                return default_timbre
+            
+            # Extract timbre features
+            spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr).mean()
+            spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr).mean()
+            spectral_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr).mean()
+            zero_crossing_rate = librosa.feature.zero_crossing_rate(y).mean()
+            
+            # Extract MFCCs
+            mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+            mfcc_means = mfccs.mean(axis=1)
+            
+            # Analyze harmonicity
+            harmonics = librosa.effects.harmonic(y)
+            percussive = librosa.effects.percussive(y)
+            harmonic_ratio = np.sum(harmonics**2) / (np.sum(percussive**2) + 1e-8)
+            
+            # Classify features
+            brightness = map_value_to_category(spectral_centroid, 
+                                             [500, 1500, 3000], 
+                                             ["dark", "medium", "bright", "very bright"])
+            
+            richness = map_value_to_category(spectral_bandwidth,
+                                          [500, 1500, 3000],
+                                          ["simple", "medium", "rich", "very rich"])
+            
+            attack_quality = map_value_to_category(zero_crossing_rate * 10000,
+                                                [50, 150, 300],
+                                                ["soft", "medium", "hard", "aggressive"])
+            
+            harmonic_quality = map_value_to_category(harmonic_ratio,
+                                                  [0.5, 2, 5],
+                                                  ["percussive", "balanced", "harmonic", "very harmonic"])
+            
+            return {
+                "brightness": brightness,
+                "richness": richness,
+                "attack": attack_quality,
+                "harmonic_quality": harmonic_quality,
+                "spectral_centroid": float(spectral_centroid),
+                "spectral_bandwidth": float(spectral_bandwidth),
+                "spectral_rolloff": float(spectral_rolloff),
+                "zero_crossing_rate": float(zero_crossing_rate),
+                "mfcc_features": [float(x) for x in mfcc_means]
+            }
+        
+        except Exception as e:
+            print(f"Warning: Error in audio analysis: {e}")
+            
     except Exception as e:
         print(f"Warning: Error in timbre analysis: {e}")
     
-    # Clean up any leftover temp files
-    for f in [midi_test_file, "temp_timbre_analysis.wav"]:
-        if f and os.path.exists(f) and os.path.basename(f).startswith("temp_"):
-            try:
-                os.remove(f)
-            except:
-                pass
+    finally:
+        # Clean up temp directory
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+        except:
+            pass
     
     # Return default values if analysis fails
     return default_timbre
+
 
 def map_value_to_category(value: float, thresholds: List[float], categories: List[str]) -> str:
     """
@@ -544,17 +611,22 @@ def map_value_to_category(value: float, thresholds: List[float], categories: Lis
             return categories[i]
     return categories[-1]
 
-def create_test_midi(output_file: str = "temp_test.mid") -> str:
+def create_test_midi(output_file: str = "") -> str:
     """
     Create a test MIDI file with a sequence of notes
     spanning different frequency ranges.
     
     Args:
-        output_file: Output MIDI filename
+        output_file: Output file path (optional, will create temp file if not provided)
         
     Returns:
         Path to the created MIDI file
     """
+    # Criar um arquivo temporário se não for especificado
+    if not output_file:
+        fd, output_file = tempfile.mkstemp(suffix=".mid")
+        os.close(fd)
+    
     try:
         midi = pretty_midi.PrettyMIDI()
         instrument = pretty_midi.Instrument(program=0)  # Piano
@@ -562,31 +634,31 @@ def create_test_midi(output_file: str = "temp_test.mid") -> str:
         # Define a sequence of notes to test different register parts
         test_sequence = [
             # Low frequencies
-            {"note": 36, "start": 0.0, "end": 0.5},     # C2
-            {"note": 40, "start": 0.5, "end": 1.0},     # E2
-            {"note": 43, "start": 1.0, "end": 1.5},     # G2
+            {"note": 36, "start": 0.0, "end": 0.5, "velocity": 100},     # C2
+            {"note": 40, "start": 0.5, "end": 1.0, "velocity": 100},     # E2
+            {"note": 43, "start": 1.0, "end": 1.5, "velocity": 100},     # G2
             
             # Mid frequencies
-            {"note": 60, "start": 1.5, "end": 2.0},     # C4
-            {"note": 64, "start": 2.0, "end": 2.5},     # E4
-            {"note": 67, "start": 2.5, "end": 3.0},     # G4
+            {"note": 60, "start": 1.5, "end": 2.0, "velocity": 100},     # C4
+            {"note": 64, "start": 2.0, "end": 2.5, "velocity": 100},     # E4
+            {"note": 67, "start": 2.5, "end": 3.0, "velocity": 100},     # G4
             
             # High frequencies
-            {"note": 84, "start": 3.0, "end": 3.5},     # C6
-            {"note": 88, "start": 3.5, "end": 4.0},     # E6
-            {"note": 91, "start": 4.0, "end": 4.5},     # G6
+            {"note": 84, "start": 3.0, "end": 3.5, "velocity": 100},     # C6
+            {"note": 88, "start": 3.5, "end": 4.0, "velocity": 100},     # E6
+            {"note": 91, "start": 4.0, "end": 4.5, "velocity": 100},     # G6
             
             # Final chord
-            {"note": 48, "start": 4.5, "end": 6.0},     # C3
-            {"note": 52, "start": 4.5, "end": 6.0},     # E3
-            {"note": 55, "start": 4.5, "end": 6.0},     # G3
-            {"note": 60, "start": 4.5, "end": 6.0},     # C4
+            {"note": 48, "start": 4.5, "end": 6.0, "velocity": 100},     # C3
+            {"note": 52, "start": 4.5, "end": 6.0, "velocity": 100},     # E3
+            {"note": 55, "start": 4.5, "end": 6.0, "velocity": 100},     # G3
+            {"note": 60, "start": 4.5, "end": 6.0, "velocity": 100},     # C4
         ]
         
         # Add notes to the instrument
         for note_info in test_sequence:
             note = pretty_midi.Note(
-                velocity=100, 
+                velocity=note_info["velocity"], 
                 pitch=note_info["note"], 
                 start=note_info["start"], 
                 end=note_info["end"]
@@ -603,6 +675,11 @@ def create_test_midi(output_file: str = "temp_test.mid") -> str:
     
     except Exception as e:
         print(f"Warning: Error creating test MIDI: {e}")
+        if os.path.exists(output_file):
+            try:
+                os.remove(output_file)
+            except:
+                pass
         return ""
 
 def generate_tag_suggestions(metadata: Dict) -> List[str]:
