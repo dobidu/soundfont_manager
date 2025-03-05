@@ -263,6 +263,47 @@ def play_wav_simple(wav_file: str, debug: bool = False) -> bool:
             print(f"Error while playing with pygame: {e}")
         return False
 
+def create_single_note_midi(output_file: str, note: int) -> bool:
+    """Create a simple MIDI file with a single note."""
+    try:
+        import pretty_midi
+        
+        midi = pretty_midi.PrettyMIDI()
+        instrument = pretty_midi.Instrument(program=0)  # Piano
+        
+        # Create a 1-second note
+        midi_note = pretty_midi.Note(
+            velocity=100,
+            pitch=note,
+            start=0.0,
+            end=1.0
+        )
+        
+        instrument.notes.append(midi_note)
+        midi.instruments.append(instrument)
+        midi.write(output_file)
+        
+        return os.path.exists(output_file)
+    except Exception as e:
+        print(f"Error creating MIDI: {e}")
+        return False
+
+def is_silent_wav(wav_file: str, threshold: float = 0.01) -> bool:
+    """Check if a WAV file is silent or contains audio."""
+    try:
+        import librosa
+        import numpy as np
+        
+        # Load the audio file
+        y, sr = librosa.load(wav_file, sr=None, mono=True)
+        
+        # Check if the audio is silent (RMS below threshold)
+        rms = np.sqrt(np.mean(y**2))
+        return rms < threshold
+    except Exception as e:
+        print(f"Error analyzing WAV: {e}")
+        return True  # Assume silent on error
+
 if __name__ == "__main__":
     import argparse
     
