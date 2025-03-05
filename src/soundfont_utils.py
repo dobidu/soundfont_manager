@@ -1,5 +1,6 @@
 import os
 import shutil
+import re
 import numpy as np
 import pretty_midi
 import logging
@@ -256,129 +257,6 @@ def calculate_file_hash(file_path: str) -> str:
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-'''
-def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
-    """
-    Analyze the note mapping in an SF2 file.
-    
-    Args:
-        sf2: Loaded Sf2File object
-        
-    Returns:
-        MappedNotes object with min_note, max_note and missing_notes
-    """
-    covered_notes = set()
-    
-    try:
-        # Primeiro, verificar os presets e seus bags
-        if hasattr(sf2, 'presets') and sf2.presets:
-            for preset in sf2.presets:
-                if hasattr(preset, 'bags') and preset.bags:
-                    for bag_idx, bag in enumerate(preset.bags):
-                        key_range = None
-                        
-                        # Verificar se o bag tem geradores
-                        if hasattr(bag, 'gens') and bag.gens:
-                            for gen in bag.gens:
-                                if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
-                                    key_range = gen.val
-                                    break
-                        
-                        # Se encontrou um key range
-                        if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
-                            # Adicionar todas as notas neste range
-                            for note in range(key_range.lo, key_range.hi + 1):
-                                if 0 <= note <= 127:
-                                    covered_notes.add(note)
-        
-        # Segundo, verificar instrumentos e seus bags
-        if (not covered_notes) and hasattr(sf2, 'instruments') and sf2.instruments:
-            for instr in sf2.instruments:
-                if hasattr(instr, 'bags') and instr.bags:
-                    for bag in instr.bags:
-                        key_range = None
-                        
-                        if hasattr(bag, 'gens') and bag.gens:
-                            for gen in bag.gens:
-                                if hasattr(gen, 'oper') and gen.oper == 43:  # keyRange
-                                    key_range = gen.val
-                                    break
-                        
-                        if key_range and hasattr(key_range, 'lo') and hasattr(key_range, 'hi'):
-                            for note in range(key_range.lo, key_range.hi + 1):
-                                if 0 <= note <= 127:
-                                    covered_notes.add(note)
-        
-        # Terceiro, verificar as amostras diretamente
-        if (not covered_notes) and hasattr(sf2, 'samples') and sf2.samples:
-            for sample in sf2.samples:
-                if hasattr(sample, 'original_key') and 0 <= sample.original_key <= 127:
-                    covered_notes.add(sample.original_key)
-                if hasattr(sample, 'original_pitch') and 0 <= sample.original_pitch <= 127:
-                    covered_notes.add(sample.original_pitch)
-    
-    except Exception as e:
-        print(f"Error in note mapping analysis: {e}")
-    
-    # Se nenhuma nota foi detectada, use um intervalo padrão com base no tipo de instrumento
-    if not covered_notes:
-        # Tente inferir um range padrão baseado nos nomes dos presets
-        instrument_type = "unknown"
-        try:
-            if hasattr(sf2, 'presets') and sf2.presets:
-                for preset in sf2.presets:
-                    if hasattr(preset, 'name'):
-                        preset_name = decode_safely(preset.name)
-                        instrument_type = infer_instrument_type(preset_name)
-                        if instrument_type != "unknown":
-                            break
-        except:
-            pass
-        
-        # Defina intervalos padrão por tipo de instrumento
-        if "bass" in instrument_type.lower():
-            # Baixo: tipicamente E1 até G4
-            for note in range(28, 67):  # E1=28, G4=67
-                covered_notes.add(note)
-        elif "guitar" in instrument_type.lower():
-            # Guitarra: típica E2 até E6
-            for note in range(40, 88):  # E2=40, E6=88
-                covered_notes.add(note)
-        elif "piano" in instrument_type.lower():
-            # Piano: A0 até C8
-            for note in range(21, 108):  # A0=21, C8=108
-                covered_notes.add(note)
-        elif "brass" in instrument_type.lower() or "wind" in instrument_type.lower():
-            # Metais/sopro: F2 até F6
-            for note in range(41, 89):  # F2=41, F6=89
-                covered_notes.add(note)
-        elif "drum" in instrument_type.lower() or "percussion" in instrument_type.lower():
-            # Percussão: toda a faixa de MIDI
-            for note in range(0, 128):
-                covered_notes.add(note)
-        else:
-            # Padrão: C1 até C7
-            for note in range(36, 96):  # C1=36, C7=96
-                covered_notes.add(note)
-    
-    # Determine min and max note
-    min_note_midi = min(covered_notes) if covered_notes else 0
-    max_note_midi = max(covered_notes) if covered_notes else 127
-    
-    min_note = MIDI_TO_NOTE.get(min_note_midi, "C0")
-    max_note = MIDI_TO_NOTE.get(max_note_midi, "C8")
-    
-    # Determine missing notes in range
-    all_possible_notes = set(range(min_note_midi, max_note_midi + 1))
-    missing_midi_notes = all_possible_notes - covered_notes
-    missing_notes = [MIDI_TO_NOTE.get(n, f"Unknown-{n}") for n in missing_midi_notes]
-    
-    return MappedNotes(
-        min_note=min_note,
-        max_note=max_note,
-        missing_notes=missing_notes
-    )
-'''
 
 def analyze_note_mapping(sf2: Sf2File) -> MappedNotes:
     """
@@ -890,6 +768,195 @@ def create_test_midi(output_file: str = "") -> str:
                 pass
         return ""
 
+def extract_tags_from_filename(filename: str) -> List[str]:
+    """
+    Extract meaningful tags from a soundfont filename with improved case handling.
+    
+    Args:
+        filename: The filename of the soundfont (without path)
+        
+    Returns:
+        List of extracted tags
+    """
+    # Strip extension
+    base_name = os.path.splitext(filename)[0]
+    
+    # Special case for numeric prefixes with brand names
+    # This matches patterns like "198_Rhodes_VS_extreme" and extracts "Rhodes"
+    special_pattern = r'^\d+_([a-zA-Z]+)_'
+    special_match = re.search(special_pattern, base_name)
+    special_tags = []
+
+    if special_match:
+        brand = special_match.group(1)
+        if brand.lower() in ['rhodes', 'yamaha', 'korg', 'roland', 'moog', 'wurlitzer']:
+            special_tags.append(brand)
+
+    # Store original for case-sensitive extraction
+    original_words = []
+    for sep in ['_', '-', '.', '+', ' ']:
+        if sep in base_name:
+            original_words.extend([w for w in base_name.split(sep) if w])
+    
+    # If no separators found, try to split by camelCase
+    if len(original_words) <= 1:
+        # Find camelCase boundaries
+        camel_boundaries = [i for i in range(1, len(base_name)) 
+                          if base_name[i-1].islower() and base_name[i].isupper()]
+        
+        if camel_boundaries:
+            last = 0
+            for b in camel_boundaries:
+                original_words.append(base_name[last:b])
+                last = b
+            original_words.append(base_name[last:])
+    
+    # If still no words found, use the whole name
+    if not original_words:
+        original_words = [base_name]
+    
+    # Convert to lowercase for dictionary matching
+    base_name_lower = base_name.lower()
+    words_lower = [w.lower() for w in original_words]
+    
+    # Direct check for brand names
+    # This ensures common brands are detected even in unusual filename formats
+    brands_to_check = ['rhodes', 'yamaha', 'korg', 'moog', 'wurlitzer', 'steinway', 'roland', 'kawai']
+    for brand in brands_to_check:
+        if brand in base_name_lower:
+            for original in original_words:
+                if brand in original.lower():
+                    special_tags.append(original)
+                    break
+            else:
+                special_tags.append(brand.capitalize())
+
+    # List of common instrument keywords to look for
+    instrument_keywords = {
+        "piano": ["piano", "grand", "upright", "steinway", "yamaha", "kawai", "rhodes", "wurlitzer"],
+        "guitar": ["guitar", "acoustic", "electric", "strat", "tele", "les", "gibson", "fender"],
+        "bass": ["bass", "upright", "double", "fretless", "acoustic", "electric"],
+        "drums": ["drum", "kit", "snare", "kick", "tom", "crash", "ride", "hihat", "percussion"],
+        "strings": ["string", "violin", "viola", "cello", "contrabass", "ensemble", "orchestra"],
+        "brass": ["brass", "trumpet", "trombone", "tuba", "horn", "ensemble"],
+        "woodwind": ["woodwind", "flute", "clarinet", "oboe", "bassoon", "saxophone", "sax"],
+        "organ": ["organ", "hammond", "church", "pipe", "reed"],
+        "synth": ["synth", "analog", "digital", "pad", "lead", "arpeggio", "moog", "korg", "roland"],
+        "ethnic": ["ethnic", "world", "asian", "african", "latin", "folk"],
+        "fx": ["fx", "effect", "sfx", "ambient", "texture", "atmosphere"]
+    }
+    
+    # List of quality or characteristic keywords
+    quality_keywords = [
+        "warm", "bright", "dark", "mellow", "sharp", "soft", "hard", "clean", "dirty",
+        "vintage", "modern", "classic", "electronic", "acoustic", "natural", "processed",
+        "smooth", "rough", "rich", "thin", "deep", "light", "heavy", "punchy",
+        "muted", "resonant", "dynamic", "static", "stereo", "mono"
+    ]
+    
+    # List of brand names to recognize
+    brand_names = [
+        "yamaha", "roland", "korg", "nord", "moog", "kurzweil", "casio", "kawai", 
+        "steinway", "bosendorfer", "fender", "gibson", "ibanez", "marshall", "akai",
+        "alesis", "emu", "ensoniq", "oberheim", "sequential", "waldorf", "novation"
+    ]
+    
+    # List of music genres
+    genres = [
+        "jazz", "rock", "pop", "classical", "blues", "funk", "soul", "rnb", "hiphop", 
+        "rap", "electronic", "edm", "house", "techno", "ambient", "folk", "country", 
+        "metal", "punk", "reggae", "latin", "world", "fusion", "experimental"
+    ]
+    
+    # Extracted tags
+    tags = set(special_tags)
+    
+    # Add significant original words as tags (keeping original case)
+    # Only add words that are likely significant (longer than 2 chars, not just numbers)
+    for word in original_words:
+        if len(word) > 2 and not word.isdigit():
+            # Don't add common articles, prepositions, etc.
+            if word.lower() not in ['the', 'and', 'for', 'with', 'from', 'of', 'in', 'by', 'to']:
+                tags.add(word)
+    
+    # Check for instrument types
+    for category, keywords in instrument_keywords.items():
+        for keyword in keywords:
+            # Check in the full name and individual words
+            if (keyword in base_name_lower or 
+                any(keyword == w for w in words_lower) or
+                any(keyword in w and len(w) < len(keyword) + 3 for w in words_lower)):
+                
+                tags.add(category)
+                # Also add the specific keyword if it's not the same as the category
+                if keyword != category:
+                    # Find the original case version if possible
+                    for original in original_words:
+                        if original.lower() == keyword:
+                            tags.add(original)
+                            break
+                    else:
+                        tags.add(keyword)
+                break
+    
+    # Add quality characteristics - check full words match first
+    for quality in quality_keywords:
+        if quality in words_lower:
+            # Find the original case version
+            for original in original_words:
+                if original.lower() == quality:
+                    tags.add(original)
+                    break
+            else:
+                tags.add(quality)
+        # Check partial matches only if not found as full words
+        elif quality in base_name_lower:
+            tags.add(quality)
+    
+    # Add brand names - prefer exact word matches
+    for brand in brand_names:
+        if brand in words_lower:
+            # Find the original case version
+            for original in original_words:
+                if original.lower() == brand:
+                    tags.add(original)
+                    break
+            else:
+                tags.add(brand)
+        # Check partial matches only if not found as full words
+        elif brand in base_name_lower:
+            tags.add(brand)
+    
+    # Add genres - prefer exact word matches
+    for genre in genres:
+        if genre in words_lower:
+            # Find the original case version
+            for original in original_words:
+                if original.lower() == genre:
+                    tags.add(original)
+                    break
+            else:
+                tags.add(genre)
+        # Check partial matches only if not found as full words
+        elif genre in base_name_lower:
+            tags.add(genre)
+    
+    # Add significant numbers that might indicate version, year, or model
+    number_pattern = r'\b(v\d+|\d{2,4})\b'
+    number_matches = re.findall(number_pattern, base_name_lower)
+    for match in number_matches:
+        tags.add(match)
+    
+    # Add GM or GS if present (General MIDI or Roland GS)
+    for word in words_lower:
+        if word == "gm" or word == "generalmidi" or word == "general_midi":
+            tags.add("gm")
+        if word == "gs" and ("roland" in tags or "roland" in base_name_lower):
+            tags.add("gs")
+    
+    # Convert to list and sort
+    return sorted(list(tags))
+
 def generate_tag_suggestions(metadata: Dict) -> List[str]:
     """
     Generate tag suggestions based on metadata.
@@ -902,6 +969,13 @@ def generate_tag_suggestions(metadata: Dict) -> List[str]:
     """
     tags = set()
     
+    # Extract tags from filename if path is available
+    if "path" in metadata and metadata["path"]:
+        filename = os.path.basename(metadata["path"])
+        filename_tags = extract_tags_from_filename(filename)
+        for ftag in filename_tags:
+            tags.add(ftag)
+
     # Add instrument type as tag
     if "instrument_type" in metadata and metadata["instrument_type"]:
         tags.add(metadata["instrument_type"])
@@ -937,7 +1011,7 @@ def generate_tag_suggestions(metadata: Dict) -> List[str]:
         for instrument in instruments:
             if instrument in name:
                 tags.add(instrument)
-    
+
     # Convert to list and sort
     return sorted(list(tags))
 
