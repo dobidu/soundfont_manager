@@ -1,9 +1,19 @@
-sf2utils>=1.0.0
-pretty_midi>=0.2.9
-librosa>=0.9.2
-colorama>=0.4.4
-numpy>=1.20.0
-typing_extensions>=4.0.0
+# Core dependencies
+setuptools>=65.5.0  # Necessário para pkg_resources
+wheel>=0.38.0       # Auxiliar para instalação de pacotes
+pretty_midi>=0.2.9  # Manipulação de arquivos MIDI
+sf2utils>=0.9.0     # Parsing de arquivos SoundFont
+librosa>=0.8.0      # Análise de áudio
+numpy>=1.19.0       # Operações numéricas
+colorama>=0.4.4     # Coloração de texto no terminal
+mido>=1.2.10        # Melhor compatibilidade MIDI no Windows
+
+# Dependências para reprodução de áudio 
+pygame>=2.1.0       # Recomendado pela ampla compatibilidade
+
 # Dependências opcionais
 matplotlib>=3.5.0  # Para visualização
 joblib>=1.1.0      # Para processamento paralelo
+
+# Para processamento de sinal avançado (opcional)
+# scipy>=1.7.0
